@@ -86,12 +86,3 @@ docker compose down
 # Dừng và xóa toàn bộ volume dữ liệu (nếu muốn reset sạch)
 docker compose down -v
 ```
-
----
-
-## Nhóm thực hiện (HCMUT — CO3137)
-
-- Nguyễn Thiện Minh — `2312097`
-- Phan Nguyễn Hoàng Nam — `2312183`
-- Nguyễn Đặng Thế Hoàng — `2311051`
-- Phan Đức Nhã — `2312410`
