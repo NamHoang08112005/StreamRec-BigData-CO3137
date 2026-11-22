@@ -1,0 +1,6 @@
+**/node_modules
+**/dist
+**/__pycache__
+data/raw
+data/seed/mp4
+.git

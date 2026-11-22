@@ -1,0 +1,151 @@
+\chapter{Cơ sở lý thuyết}
+
+\section{Kiến trúc Lambda và so sánh với kiến trúc Kappa}
+
+\subsection{Nguyên lý kiến trúc Lambda}
+
+Kiến trúc Lambda tách hệ thống xử lý dữ liệu lớn thành ba lớp bổ sung nhau nhằm cân bằng giữa độ chính xác toàn cục và độ trễ thấp:
+
+\begin{itemize}
+  \item \textbf{Batch layer:} xử lý toàn bộ dữ liệu lịch sử lưu trữ bất biến (master dataset) theo chu kỳ. Độ trễ cao hơn (phút/giờ) nhưng cho cái nhìn toàn cục, phù hợp để huấn luyện mô hình lọc cộng tác (Collaborative Filtering).
+  \item \textbf{Speed layer:} xử lý dòng sự kiện mới phát sinh với độ trễ thấp (giây) thông qua các cửa sổ thời gian (streaming windows), nắm bắt xu hướng và sở thích tức thời.
+  \item \textbf{Serving layer:} hợp nhất kết quả từ Batch view (\texttt{cf\_scores} trong PostgreSQL) và Realtime view (\path{user:affinity:*}, \path{metrics:hot_tags:1m} trong Redis) để trả lời truy vấn trực tuyến.
+\end{itemize}
+
+\subsection{So sánh Lambda và Kappa --- Lý do chọn Lambda}
+
+Trong các hệ thống xử lý dữ liệu lớn, hai kiến trúc streaming phổ biến nhất là \textbf{Lambda} và \textbf{Kappa}:
+
+\begin{center}
+{\small\SingleSpacing
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+\toprule
+Tiêu chí & Kiến trúc Lambda & Kiến trúc Kappa \\
+\midrule
+Luồng xử lý & Song song 2 nhánh: Batch (lịch sử dài hạn) + Speed (realtime). & Một nhánh duy nhất (stream-only); xử lý lại bằng cách replay log Kafka. \\
+Ưu điểm & Tối ưu cho thuật toán lặp trên toàn bộ ma trận (như ALS/SVD) kết hợp tín hiệu tức thời; dễ kiểm soát lỗi từng tầng. & Một codebase duy nhất, không phải duy trì song song Batch và Speed. \\
+Nhược điểm & Phức tạp vận hành hai pipeline; cần hợp nhất kết quả ở tầng Serving. & Khó chạy các thuật toán matrix factorization toàn cục; tốn lưu trữ log dài hạn trên Kafka. \\
+\bottomrule
+\end{tabularx}}
+\end{center}
+
+\textbf{Lựa chọn cho StreamRec:} Bài toán gợi ý video ngắn cần đồng thời \emph{lọc cộng tác toàn cục} (Spark ALS quét toàn bộ ma trận tương tác) và \emph{cập nhật sở thích tức thời} (từng cú Like/Skip). Do đó, \textbf{kiến trúc Lambda} là lựa chọn phù hợp nhất.
+
+\placeholderfig{Sơ đồ kiến trúc Lambda của StreamRec (Ingestion, Kafka, Speed, Spark Batch ALS, Redis/Postgres và Hybrid Serving)}{graphics/architecture.png}
+
+\section{Apache Kafka và xử lý dữ liệu dòng}
+
+Apache Kafka là nền tảng event streaming phân tán theo mô hình \textbf{Publish/Subscribe}, đóng vai trò bus trung tâm tách biệt (decouple) giữa tầng tiếp nhận (API) và các tầng xử lý phía sau. StreamRec sử dụng ba topic chính (mỗi topic 3 partition):
+
+\begin{itemize}
+  \item \texttt{events.user} --- dòng sự kiện hành vi người dùng (\texttt{view}, \texttt{watch}, \texttt{like}, \texttt{skip}, \texttt{share}), phân vùng theo khóa \texttt{user\_id}.
+  \item \texttt{events.content} --- sự kiện Provider đăng video mới kèm draft metadata, khóa \texttt{video\_id}.
+  \item \texttt{events.extract} --- yêu cầu (\texttt{extract.requested}) và hoàn tất (\texttt{extract.completed}) trích xuất metadata bằng FFmpeg/ffprobe.
+\end{itemize}
+
+\paragraph{Cửa sổ Tumbling (Tumbling Window).}
+Speed layer gom các sự kiện từ \texttt{events.user} theo các cửa sổ thời gian không chồng lấn độ dài $W = 60$\,giây: $[t_0, t_0+W), [t_0+W, t_0+2W), \dots$. Trong mỗi cửa sổ 60\,giây, tổng trọng số theo cặp $(\text{user}, \text{tag})$ và điểm nóng hashtag được cộng dồn trong bộ nhớ rồi ghi sớm định kỳ (\textit{micro-flush} mỗi $\approx 3$\,giây) xuống Redis nhằm vừa giữ đúng ngữ nghĩa cửa sổ 60\,giây vừa bảo đảm độ phản hồi gần tức thời cho giao diện. Để tránh hiện tượng \emph{cộng dồn hai lần (double-counting)}, tầng API chỉ đảm nhận vai trò ingestion (lưu bảng \texttt{interactions} cho Batch và publish lên Kafka), còn Speed layer là nơi duy nhất cập nhật \path{user:affinity:{user_id}}, \path{metrics:hot_tags} và \path{metrics:hot_tags:1m} trên Redis.
+
+\section{Apache Spark (Batch ALS và Structured Streaming)}
+
+\textbf{Apache Spark} cung cấp động cơ tính toán phân tán trong bộ nhớ (in-memory):
+
+\begin{itemize}
+  \item \textbf{Batch ALS} (\path{jobs/spark/batch_cf.py}): đọc bảng \texttt{interactions} từ PostgreSQL qua JDBC, gom tổng trọng số tương tác thành điểm đánh giá ngầm (pseudo-rating) $r_{uv}$ rồi huấn luyện mô hình nhân tử hóa ma trận \textbf{Alternating Least Squares (ALS)} với ràng buộc không âm ($P, Q \ge 0$, cấu hình \texttt{implicitPrefs=False}, \texttt{nonnegative=True}, \texttt{rank=16}, \texttt{maxIter=8}, \texttt{regParam=0.1}) và hàm mục tiêu chuẩn hóa theo trọng số bậc $n_u, n_v$:
+  \begin{equation}
+    \min_{P,Q \ge 0} \sum_{(u,v)\in\Omega} \left(r_{uv} - \mathbf{p}_u^{\mathsf T}\mathbf{q}_v\right)^2
+    + \lambda \left(\sum_u n_u \|\mathbf{p}_u\|^2 + \sum_v n_v \|\mathbf{q}_v\|^2\right)
+  \end{equation}
+  sau đó gọi \texttt{recommendForAllUsers(80)}, lọc bỏ video đã tương tác và giữ top-$N$ ($N=50$) video mới cho từng người dùng rồi ghi đè bảng \texttt{cf\_scores}. Job được \path{spark-batch-scheduler} gửi tự động lên cụm \path{spark://spark-master:7077} mỗi 180\,s (riêng nút \textit{Run Batch CF Now} trên Ops Dashboard kích hoạt nhanh đường fallback Truncated SVD trong API).
+  \item \textbf{Structured Streaming} (\path{jobs/spark/speed_stream.py}): đọc trực tiếp từ Kafka topic \texttt{events.user}, áp dụng watermark 2\,phút và cửa sổ tumbling 1\,phút để cập nhật Redis (có sẵn trong profile \texttt{spark-jobs}; bản chạy mặc định dùng \texttt{speed-worker} Python nhẹ RAM nhưng giữ cùng ngữ nghĩa cửa sổ).
+\end{itemize}
+
+\section{Cấu trúc dữ liệu xác suất}
+
+Khi lưu lượng người dùng và video tăng lên hàng triệu, việc đếm chính xác hoặc lưu toàn bộ danh sách đã xem trong RAM là không khả thi. StreamRec ứng dụng hai cấu trúc dữ liệu xác suất chuẩn của môn học trên Redis:
+
+\subsection{Bloom Filter --- Lọc video đã xem (Seen Filtering)}
+
+Để tránh gợi ý lặp lại video mà người dùng $u$ vừa xem hoặc đã bỏ qua, mỗi người dùng được cấp một mảng bit độ dài $m$ bit kèm $k$ hàm băm độc lập $h_1, \dots, h_k$ (lưu bằng lệnh \texttt{SETBIT}\slash\texttt{GETBIT} của Redis trên khóa \path{bf:seen:{user_id}}). Khi người dùng xem video $v$, $k$ vị trí $h_i(v) \bmod m$ được bật lên $1$. Xác suất dương tính giả (false positive) sau khi chèn $n$ video là:
+
+\begin{equation}
+  p_{\mathrm{FP}} \approx \left(1 - e^{-kn/m}\right)^k
+\end{equation}
+
+Với $m = 8\,192$\,bit ($\approx 1$\,KB/user) và $k = 5$, ngay cả khi một người dùng đã xem $n = 500$ video, xác suất lọc nhầm chỉ khoảng $0{,}13\%$, tiết kiệm bộ nhớ hơn nhiều so với việc lưu danh sách chuỗi \texttt{video\_id} đầy đủ. Đặc biệt, Bloom Filter không bao giờ có âm tính giả (false negative), đảm bảo video đã xem chắc chắn bị lọc. Trong trường hợp người dùng xem gần hết catalog demo ($\approx 700$ video) khiến tập ứng viên chưa xem cạn kiệt, tầng Serving cho phép fallback quay vòng hoặc đặt lại khóa \path{bf:seen:{user_id}} để tránh trả về feed rỗng.
+
+\subsection{HyperLogLog --- Đếm người dùng hoạt động duy nhất (cửa sổ trượt 1 phút)}
+
+Để ước lượng số lượng \emph{unique active users} đang hoạt động theo thời gian thực (hiển thị tại trang \textbf{System Ops Dashboard}), hệ thống dùng cấu trúc \textbf{HyperLogLog} tích hợp sẵn trong Redis (\texttt{PFADD}\slash\texttt{PFCOUNT}). Cụ thể, ngoài thanh ghi tổng phiên \path{hll:active_users}, hệ thống duy trì các bucket 10\,giây (\path{hll:active_10s:{bucket}}) và gộp 6 bucket gần nhất bằng một lệnh \texttt{PFCOUNT} duy nhất để cho ra số người dùng duy nhất trong \textbf{cửa sổ trượt 60\,giây} với sai số chuẩn $\approx 0{,}81\%$ và bộ nhớ cố định $\approx 12$\,KB/thanh ghi.
+
+\section{Trích xuất Metadata từ Video/Ảnh sang đặc trưng gợi ý}
+
+Giai đoạn \textbf{Video/Image $\rightarrow$ Metadata} là cầu nối giữa dữ liệu đa phương tiện phi cấu trúc và mô hình gợi ý. Khi Provider đăng tải một tệp \texttt{.mp4} mới, tầng API lưu bản ghi ở trạng thái \texttt{draft} và phát sự kiện \texttt{extract.requested} lên topic Kafka \texttt{events.extract}. Dịch vụ \texttt{extract-worker} xử lý bất đồng bộ qua ba bước: (i)~chạy \texttt{ffprobe} để tách đặc trưng kỹ thuật (thời lượng \texttt{duration\_sec}, độ phân giải, tỷ lệ khung hình, \texttt{fps}, bitrate), (ii)~dùng \texttt{ffmpeg} trích xuất ảnh đại diện (\texttt{thumbnail.jpg}) phục vụ hiển thị lưới Explore/Studio, và (iii)~tổng hợp thẻ hình thức (ví dụ: \texttt{vertical}, \texttt{short}, \texttt{hd}) với \texttt{category} và thẻ ngữ nghĩa từ Provider/dataset để hình thành vector đặc trưng $\mathbf{x}_v$ (\textit{draft tags} $\cup$ \textit{category} $\cup$ \textit{enriched tags}). Sau khi cập nhật trạng thái \texttt{enriched}, video lập tức đủ điều kiện tham gia chấm điểm Content-based và Cold-start Traffic Pool mà không làm nghẽn luồng phục vụ Feed.
+
+\section{Hybrid Recommendation tiệm cận cơ chế TikTok}
+
+\subsection{Tín hiệu hành vi ngầm (Completion Rate \& Quick Skip)}
+
+Thay vì chỉ dùng thời lượng xem tuyệt đối, hệ thống chuẩn hóa thời gian xem theo độ dài video (\texttt{duration\_sec}) và giới hạn trần ở mức $2$ (tương ứng xem lặp tối đa 2 vòng):
+\begin{equation}
+  c(u,v) = \min\!\left(2,\; \frac{\text{watch\_time}}{\max(\text{duration\_sec}, 1)}\right)
+\end{equation}
+\begin{itemize}
+  \item \textbf{Quick Skip:} nếu người dùng lướt qua video trong thời gian $< 2$\,giây trên giao diện For~You, hệ thống tự động phân loại là \texttt{skip} (trọng số âm $-0{,}5$, giảm affinity của các tag liên quan).
+  \item \textbf{Watch theo Completion Rate:} trọng số sự kiện \texttt{watch} được tính theo công thức $w_{\mathrm{watch}} = \min(4{,}0,\; 0{,}5 + 2{,}0\cdot c(u,v))$ (xem hết 100\% video ngắn mang tín hiệu tích cực mạnh hơn nhiều so với xem cùng số giây trên video dài).
+  \item \textbf{Like / Share:} trọng số mạnh ($+3{,}0$ và $+4{,}0$).
+\end{itemize}
+
+\subsection{Công thức chấm điểm Hybrid và Cold-start Traffic Pool}
+
+Khi người dùng $u$ mở hoặc tải lại For~You, tầng Serving lọc các video chưa xem qua Bloom Filter, rồi chấm điểm từng video ứng viên $v$:
+
+\begin{equation}
+  s(u,v) = \alpha\, s_{\mathrm{content}}(u,v)
+          + \beta\, s_{\mathrm{CF}}(u,v)
+          + \gamma\, s_{\mathrm{realtime}}(u,v)
+          + b_{\mathrm{cold}}(v)
+          + \varepsilon(v)
+\end{equation}
+
+trong đó $\alpha + \beta + \gamma = 1$ (mặc định $0{,}35 / 0{,}35 / 0{,}30$) và $\varepsilon(v) = 0{,}02\tanh\!\big((\mathrm{hash}(v)\bmod 100)/100\big)$ là nhiễu nhỏ phá đồng hạng (tie-breaking):
+
+\begin{itemize}
+  \item \textbf{Content ($s_{\mathrm{content}} \in [0,1]$):} độ tương đồng Cosine giữa vector tag hồ sơ người dùng $\mathbf{x}_u$ (dựng từ 100 tương tác gần nhất + tag affinity trên Redis) và vector tag video $\mathbf{x}_v$ (draft tags $\cup$ category $\cup$ enriched tags). User cold-start chưa có lịch sử nhận điểm khởi tạo $0{,}15$.
+  \item \textbf{Batch CF ($s_{\mathrm{CF}} \in [0,1]$):} điểm dự đoán từ bảng \texttt{cf\_scores} (do Spark ALS / SVD tạo ra), đã \textbf{mask bỏ các video người dùng từng tương tác} trước khi chọn top-$50$ video mới chưa xem, rồi chuẩn hóa theo giá trị lớn nhất của user $u$. Video ngoài top-$50$ hoặc user cold-start có $s_{\mathrm{CF}} = 0$.
+  \item \textbf{Realtime Speed ($s_{\mathrm{realtime}} \in [0,1]$):} tính từ bảng băm \path{user:affinity:{user_id}} do Speed Layer cập nhật (với $\epsilon = 10^{-6}$):
+  \begin{equation}
+    s_{\mathrm{realtime}}(u,v)
+    = \min\!\left(
+        1,\;
+        \frac{\sum_{t\in\mathcal{T}_v,\; a_u(t)>0} a_u(t)}
+             {\sum_{t:\; a_u(t)>0} a_u(t)+\epsilon}
+        \cdot \#\{t\in\mathcal{T}_v: a_u(t)>0\}
+      \right)
+  \end{equation}
+  Cả tử số và mẫu số đều giới hạn trên các tag có $a_u(t) > 0$ nhằm tránh suy biến mẫu số khi các cú \texttt{skip} tạo giá trị âm; thừa số $\#\{t\in\mathcal{T}_v: a_u(t)>0\}$ tăng ưu tiên cho video khớp đồng thời nhiều tag người dùng đang yêu thích.
+  \item \textbf{Cold-start Traffic Pool ($b_{\mathrm{cold}}(v)$):} mô phỏng cơ chế phân phối thử của TikTok. Video mới đăng đã đạt trạng thái \texttt{enriched} (trong 30\,phút đầu) được cộng điểm ưu tiên giảm dần theo thời gian (recency boost, tối đa $+0{,}08$) để có cơ hội xuất hiện trên For~You và thu thập phản hồi ban đầu.
+\end{itemize}
+
+\subsection{Khi nào ba điểm thành phần tăng hoặc giảm?}
+
+Để người đọc dễ hình dung cơ chế vận hành thực tế của kiến trúc Lambda trên giao diện \textbf{For~You}, bảng dưới đây tóm tắt điều kiện và độ trễ cập nhật của từng điểm thành phần:
+
+\begin{center}
+{\small\SingleSpacing
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{2.7cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{3.0cm}@{}}
+\toprule
+Thành phần & Tăng khi nào? & Giảm / bằng 0 khi nào? & Độ trễ cập nhật \\
+\midrule
+\textbf{Content} ($s_{\mathrm{content}}$) & Video ứng viên có nhiều tag/category trùng với 100 tương tác gần nhất và hồ sơ tag Redis của user. & Video thuộc chủ đề lạ, không chung tag với lịch sử của user (cold-start khởi tạo $0{,}15$). & Tức thời ở lần gọi Feed / Re-rank kế tiếp. \\
+\textbf{Batch CF} ($s_{\mathrm{CF}}$) & Khi Batch Layer (Spark ALS / SVD) chạy lại, phát hiện nhóm user cùng gu thích video chưa xem đó và đưa vào top-$50$ của user. & User mới chưa qua lần chạy Batch nào, hoặc video nằm ngoài top-$50$ dự đoán của lần chạy gần nhất. & Theo chu kỳ Batch (180\,s) hoặc bấm \textit{Run Batch CF Now}. \\
+\textbf{Realtime} ($s_{\mathrm{realtime}}$) & User vừa bấm Like ($+3$), Share ($+4$) hoặc xem lâu (completion rate cao) các video cùng tag; \texttt{speed-worker} cộng dồn vào Redis. & User bấm Skip hoặc lướt nhanh $<2$\,s (trọng số âm $-0{,}5$), hoặc video không trùng tag vừa tương tác. & Gần tức thời ($\approx 3$\,s nhờ micro-flush của Speed Layer). \\
+\bottomrule
+\end{tabularx}}
+\end{center}
+
+\subsection{Diversity Re-ranking}
+
+Sau khi sắp xếp theo $s(u,v)$ giảm dần, tầng Serving áp dụng bước hậu xử lý \textbf{Diversity Re-ranking}: duyệt tham lam để đảm bảo không xuất hiện liên tiếp các video cùng \texttt{creator\_id} hoặc quá hai video liên tiếp cùng \texttt{category}, giúp trải nghiệm lướt For~You tự nhiên và tránh tình trạng người xem chỉ thấy lặp đi lặp lại một chủ đề duy nhất gây nhàm chán.

@@ -1,0 +1,21 @@
+\chapter{Kết luận}
+
+\section{Tổng kết kết quả đạt được}
+
+Bài tập lớn \textbf{StreamRec} đã hiện thực hoàn chỉnh một hệ thống gợi ý video ngắn theo mô hình \textbf{Providers \& Customers (like TikTok)} vận hành end-to-end trên nền tảng Big Data:
+
+\begin{itemize}
+  \item Áp dụng \textbf{kiến trúc Lambda} tách biệt rõ Batch Layer (Spark ALS tự động theo lịch), Speed Layer (Kafka + Tumbling Window 60\,s $\rightarrow$ Redis) và Serving Layer (FastAPI Hybrid).
+  \item Vận dụng \textbf{cấu trúc dữ liệu xác suất} (Bloom Filter lọc video đã xem cho từng user; HyperLogLog đếm unique active users với bộ nhớ cố định 12\,KB).
+  \item Sử dụng dữ liệu thật \textbf{Tsinghua ShortVideo} (1\,000 video $\approx 11{,}3$\,GB, 231\,258 tương tác tách 70/30 theo thời gian, tách rõ tập Customers và Providers), kết hợp mô phỏng đồng thời dòng tương tác (\texttt{traffic-simulator}) và dòng đăng video mới (\texttt{upload-simulator}).
+  \item Nâng cấp thuật toán gợi ý tiệm cận cơ chế thực tế: chuẩn hóa \textit{completion rate}, phát hiện \textit{quick-skip} $<2$\,s, \textit{Cold-start Traffic Pool} và \textit{Diversity Re-ranking}.
+  \item Thiết kế giao diện TikTok Web sạch sẽ (\texttt{For You}, \texttt{Explore}, \texttt{TikTok Studio}) tích hợp nút \textbf{Show Big Data} ẩn/hiện đúng số liệu theo ngữ cảnh từng trang và hai trang giám sát\slash mô phỏng tách riêng là \textbf{Live Simulation (\texttt{/simulation})} và \textbf{System Ops (\texttt{/dashboard})}.
+\end{itemize}
+
+\section{Hướng phát triển}
+
+\begin{itemize}
+  \item \textbf{Tích hợp tầng Recall bằng LSH / Vector Database:} Áp dụng Locality-Sensitive Hashing (LSH) hoặc ANN (Faiss/Milvus) để thu hẹp tập ứng viên trước khi chấm điểm Hybrid khi catalog mở rộng lên hàng triệu video.
+  \item \textbf{Trích xuất đặc trưng đa phương thức (Multimodal AI):} Bổ sung worker chạy CLIP\slash Whisper lắng nghe trên topic \texttt{events.extract} để tự động sinh embedding nội dung video và âm thanh thay cho tag thủ công.
+  \item \textbf{Triển khai phân tán thực tế:} Chuyển lưu trữ media lên Object Storage (MinIO/S3), mở rộng Kafka và Spark trên cụm nhiều node (Kubernetes/YARN), đồng thời lưu dữ liệu lịch sử dưới định dạng cột (Parquet/Delta Lake).
+\end{itemize}

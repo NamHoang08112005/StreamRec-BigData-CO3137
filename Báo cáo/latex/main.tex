@@ -1,0 +1,100 @@
+% Bao cao Bai tap lon Big Data -- StreamRec
+\documentclass[vietnamese,final]{hcmut-thesis}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage[nameinlink]{cleveref}
+\usepackage{xurl}
+\usepackage[section]{placeins}
+\usetikzlibrary{positioning}
+
+\emergencystretch=1.5em
+
+\setlist[itemize]{leftmargin=1.6em, itemsep=0.25em, topsep=0.35em}
+\setlist[enumerate]{leftmargin=1.8em, itemsep=0.25em, topsep=0.35em}
+
+% Tu dong chen hinh that neu file ton tai; nguoc lai hien khung tam
+\newcommand{\placeholderfig}[2]{%
+  \begin{figure}[htbp]
+    \centering
+    \IfFileExists{../#2}{%
+      \includegraphics[width=0.92\textwidth,height=0.42\textheight,keepaspectratio]{../#2}%
+    }{%
+      \IfFileExists{#2}{%
+        \includegraphics[width=0.92\textwidth,height=0.42\textheight,keepaspectratio]{#2}%
+      }{%
+        \fbox{\begin{minipage}[c][4.2cm][c]{0.88\textwidth}
+          \centering
+          \textbf{HÌNH CẦN BỔ SUNG}\\[0.5em]
+          {\small #1}\\[0.3em]
+          {\ttfamily\footnotesize #2}
+        \end{minipage}}%
+      }%
+    }%
+    \caption{#1}
+  \end{figure}
+}
+
+\reporttype{Bài tập lớn}
+\title{StreamRec: Hệ thống gợi ý video ngắn kiểu TikTok trên kiến trúc Lambda}
+\stumajor{Khoa học Máy tính}
+\supervisor{NGUYỄN QUANG HÙNG}
+\stuname{
+  \begin{tabular}{@{}l@{\hspace{1em}}l@{}}
+    Nguyễn Thiện Minh & -- 2312097 \\
+    Phan Nguyễn Hoàng Nam & -- 2312183 \\
+    Nguyễn Đặng Thế Hoàng & -- 2311051 \\
+    Phan Đức Nhã & -- 2312410
+  \end{tabular}
+}
+
+\begin{document}
+\coverpage
+
+\tableofcontents
+\clearpage
+
+\mainmatter
+\counterwithin{equation}{chapter}
+\counterwithin{table}{chapter}
+\counterwithin{figure}{chapter}
+
+\include{chapters/main/01-introduction}
+\include{chapters/main/02-theory}
+\include{chapters/main/03-implementation}
+\include{chapters/main/04-results}
+\include{chapters/main/05-conclusion}
+
+\chapter*{Tuyên bố sử dụng công cụ AI (AI-Use Statement)}
+\addcontentsline{toc}{chapter}{Tuyên bố sử dụng công cụ AI (AI-Use Statement)}
+
+Trong quá trình thực hiện bài tập lớn môn \textbf{Dữ liệu lớn (CO3137)}, nhóm có sử dụng một số công cụ trí tuệ nhân tạo tạo sinh (Generative AI) ở mức độ hỗ trợ nhằm nâng cao hiệu quả học tập và trình bày:
+
+\begin{itemize}
+  \item Hỗ trợ tra cứu kiến thức kỹ thuật, gợi ý cấu trúc mã nguồn tham khảo và hỗ trợ gỡ lỗi trong quá trình triển khai hệ thống.
+  \item Hỗ trợ rà soát ngữ pháp, diễn đạt tiếng Việt và chuẩn hóa định dạng trình bày báo cáo bằng \LaTeX.
+\end{itemize}
+
+Toàn bộ ý tưởng thiết kế kiến trúc, quá trình chuẩn bị dữ liệu, cài đặt, chạy thực nghiệm, thu thập kết quả và kiểm chứng mã nguồn đều do các thành viên trong nhóm trực tiếp thực hiện và rà soát. Nhóm cam kết tuân thủ quy định liêm chính học thuật của Trường Đại học Bách Khoa --- ĐHQG TP.HCM, không ngụy tạo số liệu thực nghiệm và hoàn toàn chịu trách nhiệm về tính chính xác của nội dung báo cáo cũng như sản phẩm demo.
+
+\vspace{1.5em}
+\noindent\textit{TP. Hồ Chí Minh, ngày 22 tháng 11 năm 2026}
+
+\noindent\textbf{Nhóm thực hiện:} Nguyễn Thiện Minh, Phan Nguyễn Hoàng Nam, Nguyễn Đặng Thế Hoàng, Phan Đức Nhã.
+
+\chapter*{Tài liệu tham khảo}
+\addcontentsline{toc}{chapter}{Tài liệu tham khảo}
+\begin{enumerate}[label={[\arabic*]}, leftmargin=2.2em, itemsep=0.4em]
+  \item N. Marz and J. Warren, \textit{Big Data: Principles and Best Practices of Scalable Real-Time Data Systems}, Manning Publications, 2015.
+  \item Tsinghua University, \textit{ShortVideo Dataset (CC BY 4.0)}, Short-Video Recommendation Benchmark Dataset.
+  \item Y. Zhou, D. Wilkinson, R. Schreiber, and R. Pan, ``Large-Scale Parallel Collaborative Filtering for the Netflix Prize,'' in \textit{Proc. AAIM}, Springer, 2008; Apache Spark MLlib ALS Documentation (Spark 3.5).
+  \item J. Kreps, N. Narkhede, and J. Rao, ``Kafka: A Distributed Messaging System for Log Processing,'' in \textit{Proc. NetDB}, 2011; Apache Kafka 3.7 Documentation.
+  \item B. H. Bloom, ``Space/Time Trade-offs in Hash Coding with Allowable Errors,'' \textit{Communications of the ACM}, vol.~13, no.~7, pp.~422--426, 1970.
+  \item P. Flajolet, \'E. Fusy, O. Gandouet, and F. Meunier, ``HyperLogLog: The Analysis of a Near-Optimal Cardinality Estimation Algorithm,'' in \textit{Proc. AofA / DMTCS}, pp.~127--146, 2007.
+\end{enumerate}
+
+\end{document}

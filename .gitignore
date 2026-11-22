@@ -1,0 +1,29 @@
+# Dependencies & builds
+node_modules/
+dist/
+__pycache__/
+*.pyc
+
+# Environment & secrets
+.env
+.venv/
+venv/
+
+# Logs & OS/IDE metadata
+*.log
+.DS_Store
+.idea/
+.vscode/
+.archify/
+.cursor/
+.superpowers/
+
+# Large datasets & generated media
+data/raw/
+data/coldstart/
+data/seed/mp4/
+data/seed/bootstrap_meta.json
+
+# LaTeX build artifacts & template PDF
+Báo cáo/latex/build/
+Báo cáo/Mẫu.pdf

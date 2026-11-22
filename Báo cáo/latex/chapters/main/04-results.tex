@@ -1,0 +1,66 @@
+\chapter{Kết quả thu được và đánh giá}
+
+\section{Kịch bản kiểm thử và demo end-to-end}
+
+Hệ thống hỗ trợ kịch bản bảo vệ trực tiếp trong khoảng \textbf{6 phút} theo đúng hai vai trò Providers \& Customers, phân bổ thời gian như sau:
+
+\begin{enumerate}
+  \item \textbf{For~You --- Customer Cold-start \& Live Diff ($\approx 1{,}5$\,phút):} Chọn user \texttt{[cold-start]} (0 lịch sử), lướt video và bấm Like 2--3 video cùng chủ đề hoặc lướt nhanh $<2$\,s (auto-skip). Bật \textbf{Show Big Data} để quan sát điểm Hybrid, hồ sơ affinity, bộ lọc Bloom Filter và bảng \textbf{Top 10 Live Diff} thay đổi, sau đó bấm \textbf{Apply \& Re-rank} để chứng minh feed lập tức dịch chuyển theo sở thích mới.
+  \item \textbf{Explore (Speed Layer) \& Live Simulation 5+5 ($\approx 1{,}5$\,phút):} Mở trang \textbf{Explore} (\texttt{/trending}) bật \textbf{Show Big Data} để đối chiếu các video đứng đầu với bảng Hot Tags cửa sổ 60\,s trên \path{metrics:hot_tags:1m}; tiếp đó chuyển sang \textbf{Live Simulation} (\texttt{/simulation}) để trình diễn trực quan tường 5 điện thoại Customer và 5 điện thoại Provider chạy song song theo thời gian thực.
+  \item \textbf{TikTok Studio --- Provider Upload \& Cold-start Boost ($\approx 1{,}5$\,phút):} Đăng một video mới (hoặc quan sát \texttt{upload-simulator} tự đẩy), bật \textbf{Show Big Data} để thấy trạng thái chuyển \texttt{draft} $\rightarrow$ \texttt{extracting} $\rightarrow$ \texttt{enriched} kèm metadata \texttt{ffprobe}, rồi quay lại For~You kiểm tra video mới được hưởng Cold-start Boost.
+  \item \textbf{System Ops (\texttt{/dashboard}) \& Spark UI (\texttt{:8080}) ($\approx 1{,}5$\,phút):} Quan sát biểu đồ throughput realtime (events/sec), chỉ số \textbf{HyperLogLog} (unique active users 1 phút), và lịch sử job \textbf{Spark Batch ALS} chạy định kỳ trên \texttt{spark-master:7077}. \textit{Lưu ý thực hành khi demo:} nên khởi động stack trước vài phút (hoặc để \path{spark-batch-scheduler} hoàn tất lượt chạy chu kỳ 180\,s trước Bước~3) để job \texttt{recsys-batch-als} đã hiển thị trạng thái \texttt{FINISHED} trên Spark UI \texttt{:8080} mà không phải chờ 43\,s trực tiếp trong giờ bảo vệ.
+\end{enumerate}
+
+\subsection*{Cơ chế vận hành cụm Apache Spark (Master--Worker) cho Batch Layer}
+
+Để minh chứng tầng \textbf{Batch Layer} trong kiến trúc Lambda thực sự chạy trên công cụ xử lý dữ liệu lớn phân tán thay vì tính toán cục bộ trên máy chủ web, hệ thống triển khai cụm Apache Spark theo mô hình \textbf{Master--Worker} gồm ba thành phần phối hợp:
+
+\begin{itemize}
+  \item \textbf{\texttt{spark-master} (Điều phối tài nguyên):} Quản lý trạng thái cụm và phân bổ CPU/RAM cho các ứng dụng gửi lên (\texttt{spark://spark-master:7077}), không trực tiếp tính toán dữ liệu.
+  \item \textbf{\texttt{spark-worker} (Nút thực thi):} Cấp phát \textbf{Executor} (2~Cores, 1\,GiB RAM trên mỗi lượt chạy) để trực tiếp đọc toàn bộ bảng \texttt{interactions} từ PostgreSQL qua JDBC, huấn luyện mô hình \textbf{ALS} (Apache Spark MLlib) phân rã ma trận User $\times$ Video, lọc bỏ video đã tương tác và ghi Top~50 gợi ý chuẩn hóa $[0, 1]$ cho mỗi người dùng vào bảng \texttt{cf\_scores}.
+  \item \textbf{\texttt{spark-batch-scheduler} (Lập lịch định kỳ):} Tự động gửi lệnh \texttt{spark-submit} cho job \texttt{recsys-batch-als} theo chu kỳ \textbf{180\,s (3 phút/lần)} (thay cho chu kỳ hàng giờ/hàng ngày ngoài thực tế nhằm phục vụ quan sát trực tiếp khi demo). Trong lần chạy thực nghiệm, job hoàn tất sau \textbf{43\,s} (\texttt{FINISHED}), tính và ghi \textbf{144\,350 cặp điểm} cho \textbf{2\,887 người dùng} và \textbf{695 video}.
+\end{itemize}
+
+\noindent\textbf{Ý nghĩa kiến trúc của \texttt{spark-\allowbreak worker}:} Nếu không có \texttt{spark-\allowbreak worker} hoạt động (\texttt{Alive Workers = 0}), mọi job gửi lên \texttt{spark-master} sẽ treo ở trạng thái \texttt{WAITING} do không có tài nguyên tạo Executor; tầng Batch ngừng cập nhật, điểm \texttt{cf\_batch} suy biến về $0$ và hệ thống mất hoàn toàn năng lực lọc cộng tác. Ngược lại, nhờ tách bạch Master--Worker, khi dữ liệu tăng từ vài trăm nghìn lên hàng trăm triệu tương tác, hệ thống chỉ cần mở rộng ngang (\textit{horizontal scale-out}) bằng cách bổ sung thêm các nút \texttt{spark-\allowbreak worker} mà không cần sửa mã nguồn thuật toán \path{jobs/spark/batch_cf.py}.
+
+\placeholderfig{Spark Master UI (:8080) hiển thị 1 Alive Worker và job Batch ALS (\texttt{recsys-batch-als}) hoàn thành sau 43\,s}{graphics/spark-ui.png}
+
+\section{Đánh giá định lượng Offline (Hold-out 70/30)}
+
+Để đánh giá chất lượng gợi ý một cách khách quan ngoài quan sát định tính, nhóm thiết lập phép đo offline trên chính phép tách theo thời gian của bộ dữ liệu ShortVideo: huấn luyện trên 70\% tương tác sớm (\path{interactions_history.csv}, 161\,886 dòng; nhánh Batch CF offline sử dụng Truncated SVD với $k=16$) và đánh giá khả năng dự đoán top-$K$ ($K = 10$) trên 30\% tương tác muộn (\path{interactions_stream.csv}, 69\,372 dòng) bằng ba độ đo chuẩn: \textbf{Precision@10}, \textbf{Recall@10} và \textbf{NDCG@10}. Để đánh giá nhánh realtime ($s_{\mathrm{realtime}}$) mà \textbf{không rò rỉ dữ liệu kiểm thử (no test leakage)}, luồng 30\% muộn của mỗi người dùng được tách tiếp theo thời gian: 20\% tương tác đầu dựng hồ sơ sở thích ngắn hạn và 80\% còn lại làm nhãn ground-truth hold-out.
+
+\begin{center}
+{\small\SingleSpacing
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}Xccc@{}}
+\toprule
+Mô hình / Cấu hình & Precision@10 & Recall@10 & NDCG@10 \\
+\midrule
+Popularity baseline & $0{,}0004$ & $0{,}0025$ & $0{,}0011$ \\
+Batch CF --- SVD/ALS ($\beta=1$) & $0{,}0029$ & $0{,}0136$ & $0{,}0068$ \\
+Hybrid ($\alpha=0{,}35,\ \beta=0{,}35,\ \gamma=0{,}30$) & $0{,}0043$ & $0{,}0205$ & $0{,}0119$ \\
+Content-based ($\alpha=1$) & $0{,}0054$ & $0{,}0247$ & $0{,}0158$ \\
+\bottomrule
+\end{tabularx}}
+\end{center}
+
+Kết quả đo thực nghiệm trên \textbf{2\,133 người dùng} có tương tác mới ở tập 30\% hold-out (\path{scripts/data/eval_offline.py}) cho thấy: toàn bộ các mô hình cá nhân hóa đều vượt xa \textit{Popularity baseline} từ \textbf{5 đến 14 lần} trên cả ba độ đo (Batch CF gấp $5{,}4$--$7{,}3\times$, Hybrid gấp $8{,}2$--$10{,}8\times$, Content-based gấp $9{,}9$--$14{,}4\times$). Giá trị tuyệt đối $\text{Precision@10} = 0{,}0043$ là hoàn toàn bình thường trong bài toán gợi ý video ngắn có độ thưa ma trận rất cao (gấp hơn $10\times$ so với baseline $0{,}0004$). Đáng chú ý, do độ thưa lớn và nhiều video ít lịch sử ở tập 30\% hold-out, nhánh \textbf{Content-based} thuần đạt NDCG@10 nhỉnh hơn \textbf{Hybrid} ($0{,}0158$ so với $0{,}0119$) trong phép đo offline tĩnh; tuy nhiên trong vận hành trực tuyến, \textbf{Hybrid} đánh đổi một phần nhỏ NDCG offline để mang lại hai năng lực thiết yếu mà Content thuần không có: khám phá nội dung chéo chủ đề từ \textbf{Batch CF} và thích nghi tức thời theo hành vi trong phiên từ \textbf{Speed Layer}.
+
+\section{Quan sát định tính}
+
+\begin{itemize}
+  \item \textbf{Phản ứng realtime:} Khi tăng $\gamma$ và tương tác trên một chủ đề, bảng \textbf{Show Big Data} cho thấy affinity tăng ngay và thứ tự For~You thay đổi ở lần Re-rank kế tiếp.
+  \item \textbf{Lọc lặp và đa dạng hóa:} Bloom Filter loại bỏ các video người dùng vừa xem/bỏ qua; Diversity Re-ranking ngăn hiện tượng nhiều video cùng creator hoặc cùng category xuất hiện liên tiếp.
+  \item \textbf{Tách biệt tốc độ xử lý:} Luồng upload và trích xuất FFmpeg chạy bất đồng bộ qua Kafka không làm nghẽn API phục vụ Feed.
+\end{itemize}
+
+\section{Giới hạn của hệ thống hiện tại}
+
+Nhóm xác định rõ các giới hạn kỹ thuật của bản triển khai bài tập lớn so với một hệ thống thương mại quy mô toàn cầu như TikTok:
+
+\begin{enumerate}
+  \item \textbf{Hạ tầng đơn máy (Single-host Docker Compose):} Toàn bộ Kafka, Spark (1 master + 1 worker), PostgreSQL và Redis chạy trên cùng một laptop để phục vụ demo, chưa triển khai cụm phân tán nhiều nút vật lý (HDFS/YARN/Kubernetes) hay hệ thống lưu trữ đối tượng phân tán (S3/MinIO/CDN).
+  \item \textbf{Trích xuất metadata ở mức kỹ thuật:} \texttt{extract-worker} hiện dùng \texttt{ffprobe}/\texttt{ffmpeg} để tách thông số kỹ thuật (duration, độ phân giải, fps, thumbnail, tag hình thức) kết hợp tag từ Provider/dataset, chưa chạy các mô hình Deep Learning đa phương thức (như CLIP cho hình ảnh, Whisper cho âm thanh, OCR cho chữ trong video) do giới hạn GPU. Tuy nhiên, kiến trúc Kafka \texttt{events.extract} cho phép gắn thêm AI worker mà không cần sửa API.
+  \item \textbf{Serving chấm điểm trực tiếp tập ứng viên nhỏ:} Với catalog demo $\approx 700$--$1\,000$ video, tầng Serving tính độ tương đồng Cosine trực tiếp trên tập ứng viên (tối đa $1\,000$ video) trong mỗi truy vấn. Ở quy mô hàng trăm triệu video thực tế, hệ thống bắt buộc phải tách thành hai tầng: \textit{Candidate Generation / Recall} (dùng LSH hoặc Vector Database ANN như Faiss/Milvus) rồi mới đưa top vài trăm video qua tầng \textit{Ranking}.
+  \item \textbf{Mô phỏng replay là vòng hở (Open-loop):} \texttt{traffic-simulator} phát lại log tương tác lịch sử theo timeline tăng tốc, nên không thể mô phỏng phản hồi thích nghi của người dùng thật đối với các thay đổi thuật toán xếp hạng (khác với thử nghiệm A/B trực tuyến vòng kín).
+\end{enumerate}

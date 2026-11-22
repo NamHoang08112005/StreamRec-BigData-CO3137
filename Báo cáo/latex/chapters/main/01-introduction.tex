@@ -1,0 +1,54 @@
+\chapter{Giới thiệu}
+
+\section{Giới thiệu đề tài}
+
+Nền tảng video ngắn (short-video) như TikTok tạo ra lượng sự kiện tương tác khổng lồ theo thời gian thực: xem, bỏ qua nhanh, thích, chia sẻ, song song với dòng video mới được các nhà sáng tạo nội dung (Provider) đăng tải liên tục. Hệ thống gợi ý phải đồng thời giải quyết ba bài toán: tận dụng lịch sử dài hạn (collaborative filtering), phản ứng gần như tức thời với hành vi ngắn hạn (streaming), và phân phối được nội dung mới (item cold-start) trên một giao diện tiêu thụ mượt mà.
+
+Trong bài tập lớn môn \textbf{Dữ liệu lớn (CO3137)}, nhóm xây dựng \textbf{StreamRec} --- hệ thống mô phỏng nền tảng gợi ý video ngắn theo mô hình \textbf{Providers \& Customers (like TikTok)}, triển khai trên \textbf{kiến trúc Lambda}:
+
+\begin{itemize}
+  \item \textbf{Batch layer:} học điểm collaborative filtering dài hạn bằng \textbf{Apache Spark MLlib ALS} chạy định kỳ tự động trên cụm \texttt{spark-master:7077} (kèm đường fallback Truncated SVD nhẹ trong API khi cần).
+  \item \textbf{Speed layer:} xử lý dòng sự kiện \texttt{events.user} từ \textbf{Apache Kafka} theo cửa sổ tumbling 60\,giây để cập nhật sở thích ngắn hạn (\path{user:affinity:{user_id}}) và xu hướng (\path{metrics:hot_tags}, \path{metrics:hot_tags:1m}) trên \textbf{Redis}.
+  \item \textbf{Cấu trúc dữ liệu xác suất (Probabilistic Data Structures):} sử dụng \textbf{Bloom Filter} trên Redis để lọc video đã xem (seen-filtering) cho từng người dùng, và \textbf{HyperLogLog} (\texttt{PFADD}\slash\texttt{PFCOUNT}) để ước lượng số người dùng hoạt động duy nhất (unique active users) với bộ nhớ cố định $\approx 12$\,KB.
+  \item \textbf{Serving layer:} FastAPI hợp nhất điểm $\alpha\cdot\text{content} + \beta\cdot\text{CF} + \gamma\cdot\text{realtime}$, bổ sung \textbf{Cold-start Traffic Pool (Recency Boost)} cho video mới đăng và \textbf{Diversity Re-ranking} tránh lặp liên tiếp cùng creator/chủ đề.
+\end{itemize}
+
+\section{Đặc trưng 4V của Big Data trong bài toán}
+
+Hệ thống StreamRec được thiết kế để phản ánh đầy đủ bốn đặc trưng \textbf{4V} của Dữ liệu lớn ở quy mô bài tập lớn:
+
+\begin{center}
+{\small\SingleSpacing
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}X@{}}
+\toprule
+Đặc trưng & Thể hiện cụ thể trong StreamRec \\
+\midrule
+\textbf{Volume} & 1\,000 video thật ($\approx 11{,}3$\,GB), tập tương tác gốc 795\,071 dòng (231\,258 dòng sau khi lọc theo các video có file \texttt{.mp4}). \\
+\textbf{Velocity} & Dòng sự kiện tương tác được \texttt{traffic-simulator} phát lại theo timeline thực (tăng tốc \texttt{SPEEDUP}, đạt trần tới 200\,events/giây) qua Kafka, kết hợp \texttt{upload-simulator} đẩy 5 video mới mỗi 15\,giây. \\
+\textbf{Variety} & Kết hợp dữ liệu phi cấu trúc (video \texttt{.mp4}, ảnh thumbnail \texttt{.jpg}), bán cấu trúc (JSON event trên Kafka, metadata \texttt{ffprobe}), và có cấu trúc (PostgreSQL, CSV 28 cột). \\
+\textbf{Veracity} & Xử lý dữ liệu nhiễu/thiếu: lọc noise tag (\texttt{tag\_filters}), kiểm tra tính toàn vẹn file media trước khi xếp hạng (\texttt{media\_file\_ok}), giải quyết cold-start cho cả user mới và video mới. \\
+\bottomrule
+\end{tabularx}}
+\end{center}
+
+\section{Bài toán Providers \& Customers và dataset ShortVideo}
+
+Bài toán gồm hai vai trò tách biệt (được kiểm chứng trực tiếp trên toàn bộ \path{interaction_filtered.csv} --- ví dụ trong 50\,000 dòng đầu có 1\,095 \texttt{user\_id} và 851 \texttt{author\_id} với độ giao nhau bằng 0):
+
+\begin{itemize}
+  \item \textbf{Customer (người xem):} sử dụng giao diện TikTok Web gồm \textbf{For~You} (feed dọc toàn màn hình, tự phát hiện quick-skip $<2$\,s, tính tỷ lệ xem \textit{completion rate}) và \textbf{Explore} (khám phá video theo xu hướng Speed Layer).
+  \item \textbf{Provider (người đăng):} sử dụng \textbf{TikTok Studio} để đăng video kèm preview trực tiếp; video đi qua pipeline bất đồng bộ \texttt{draft} $\rightarrow$ \texttt{extracting} $\rightarrow$ \texttt{enriched} rồi vào Cold-start Traffic Pool.
+\end{itemize}
+
+Nhóm \textbf{không crawl} TikTok / YouTube / Kuaishou production. Nguồn dữ liệu chính là bộ dữ liệu học thuật \textbf{Tsinghua ShortVideo} (giấy phép CC BY 4.0) gồm file \texttt{.mp4} thật, bảng tương tác 28 cột và metadata (category, title). Dữ liệu tương tác sau khi lọc theo 1\,000 video có file thật (231\,258 dòng) được \textbf{tách theo mốc thời gian \texttt{exposed\_time}}: 70\% sớm (161\,886 dòng) nuôi Batch CF; 30\% muộn (69\,372 dòng) để \texttt{traffic-simulator} replay lên Kafka. Tương tự, 1\,000 video được chia thành 700 video catalog ấm và 300 video trong \texttt{upload\_pool} cho \texttt{upload-simulator}.
+
+\section{Mục tiêu}
+
+\begin{itemize}
+  \item Xây dựng pipeline thu thập, tách dữ liệu theo thời gian và nạp dữ liệu ShortVideo thật vào stack Docker Compose.
+  \item Triển khai kiến trúc Lambda với Kafka làm event bus, Speed Layer xử lý cửa sổ tumbling 60\,s, và Spark Batch ALS chạy định kỳ trên cụm Spark.
+  \item Ứng dụng cấu trúc dữ liệu xác suất (Bloom Filter và HyperLogLog) vào đúng bài toán thực tế của nền tảng video ngắn.
+  \item Nâng cấp Hybrid Recommendation tiệm cận hành vi TikTok (completion rate, quick-skip, seen-filtering, cold-start boost, diversity re-ranking) và đánh giá định lượng offline (Precision@K, Recall@K, NDCG@K) trên tập chia 70/30.
+  \item Xây dựng giao diện TikTok Web thuần túy kèm nút \textbf{Show Big Data} ẩn/hiện theo ngữ cảnh từng trang và trang \textbf{System Ops (/dashboard)} tách riêng.
+\end{itemize}

@@ -1,0 +1,100 @@
+\chapter{Triển khai}
+
+Toàn bộ hệ thống được đóng gói bằng \textbf{Docker Compose}. Sau lệnh \texttt{docker compose up --build -d}, các điểm truy cập chính gồm:
+
+\begin{itemize}
+  \item Web (TikTok UI \& Ops Dashboard): \texttt{http://localhost:5173}
+  \item FastAPI Serving \& Ingestion: \texttt{http://localhost:8000/health}
+  \item Apache Spark Master UI: \texttt{http://localhost:8080}
+\end{itemize}
+
+\section{Thu thập và chuẩn bị dữ liệu}
+
+Chính sách dữ liệu (data provenance):
+\begin{itemize}
+  \item Không crawl dữ liệu từ các nền tảng thương mại production.
+  \item Toàn bộ video phát trên Feed đều là file \texttt{.mp4} thật từ bộ dữ liệu \textbf{Tsinghua ShortVideo} (CC BY 4.0).
+  \item Không sinh dữ liệu giả bằng bot ngẫu nhiên; mọi tương tác mô phỏng đều là replay từ log thật.
+\end{itemize}
+
+\subsection*{Số liệu chuẩn hóa trên đĩa}
+
+Sau quá trình tải và tiền xử lý tại \path{data/raw/shortvideo/} và \path{data/coldstart/}:
+
+\begin{center}
+{\small\SingleSpacing
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{4.8cm}>{\raggedright\arraybackslash}X>{\raggedleft\arraybackslash}p{3.4cm}@{}}
+\toprule
+Thành phần & Vai trò & Quy mô thực tế \\
+\midrule
+Video \texttt{.mp4} đã tải & Tổng kho video ($\le 20$\,MB/file) & 1\,000 video ($\approx 11{,}3$\,GB) \\
+Catalog ấm (\path{raw_file/}) & Nạp ban đầu qua ETL (70\%) & 700 video \\
+Cold-start pool (\path{upload_pool/}) & \texttt{upload-simulator} đăng định kỳ (30\%) & 300 video \\
+\path{interaction_sampled.csv} & Log tương tác gốc (28 cột) & 795\,071 dòng \\
+\path{interaction_filtered.csv} & Lọc giữ các \texttt{pid} có file \texttt{.mp4} & 231\,258 dòng \\
+\path{interactions_history.csv} & 70\% sớm theo \texttt{exposed\_time} (Batch CF) & 161\,886 dòng \\
+\path{interactions_stream.csv} & 30\% muộn theo \texttt{exposed\_time} (Replay) & 69\,372 dòng \\
+\bottomrule
+\end{tabularx}}
+\end{center}
+
+\subsection*{Cột dữ liệu cốt lõi và tách vai trò Providers / Customers}
+
+Mỗi dòng CSV đại diện cho một lần người dùng (\texttt{user\_id} $\rightarrow$ \texttt{sv\_<id>}) tương tác với video (\texttt{pid} $\rightarrow$ \texttt{video\_id\_map[pid]}), thuộc về tác giả (\texttt{author\_id} $\rightarrow$ \texttt{creator\_id}). Kiểm tra trực tiếp trên \texttt{interaction\_filtered.csv} cho thấy tập \texttt{user\_id} (Customers) và \texttt{author\_id} (Providers) hoàn toàn tách biệt (độ giao nhau bằng 0).
+
+\subsection*{Quy trình nạp dữ liệu (ETL)}
+
+\begin{enumerate}
+  \item Tải 1\,000 video thật bằng \path{scripts/data/download_shortvideo_fast.py}.
+  \item Lọc CSV theo danh sách \texttt{pid} có file thật bằng \path{scripts/data/filter_interactions_by_videos.py}.
+  \item Tách 70/30 theo mốc thời gian \texttt{exposed\_time} bằng \path{scripts/data/split_interactions.py}.
+  \item Tách 30\% video sang \path{data/coldstart/upload_pool/} bằng \path{scripts/data/split_coldstart_pool.py}.
+  \item Nạp catalog ấm + seed history + tạo \texttt{video\_id\_map.json} bằng \path{scripts/data/etl_shortvideo.py}, sau đó khởi tạo 1 user cold-start bằng \path{scripts/data/reset_coldstart_user.py}.
+\end{enumerate}
+
+\placeholderfig{Luồng chuẩn bị dữ liệu Tsinghua ShortVideo: lọc mp4, tách 70/30 history/stream, cold-start pool và mô phỏng runtime}{graphics/data-simulation.png}
+
+\section{Kiến trúc lưu trữ và các service Docker}
+
+\begin{center}
+{\small\SingleSpacing
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\ttfamily\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{2.8cm}>{\raggedright\arraybackslash}X@{}}
+\toprule
+\normalfont Service & Công nghệ & Vai trò trong hệ thống \\
+\midrule
+postgres & PostgreSQL 16 & Lưu \texttt{users}, \texttt{videos}, \texttt{interactions}, \texttt{cf\_scores}, \texttt{serving\_weights}, \texttt{follows}. \\
+redis & Redis 7 & Lưu \path{user:affinity:*}, \path{metrics:hot_tags(:1m)}, Bloom Filter (\path{bf:seen:*}), HyperLogLog (\path{hll:active_users}, \path{hll:active_10s:*}), velocity buckets. \\
+kafka & Kafka 3.7 (KRaft) & Event bus 3 topic chính: \path{events.user}, \path{events.content}, \path{events.extract} (kèm \path{features.user}, \path{features.item} dự phòng). \\
+spark-master/worker & Apache Spark 3.5 & Cụm Spark standalone (UI cổng 8080): \texttt{spark-master} điều phối tài nguyên, \texttt{spark-worker} (2 Cores, 2\,GiB RAM) thực thi Executor cho job Batch ALS (\path{batch_cf.py}). \\
+spark-batch-scheduler & Spark Client & Tự động gọi \texttt{spark-submit} job \texttt{recsys-batch-als} lên cụm Spark theo chu kỳ 180\,s (3 phút/lần). \\
+api & FastAPI & Ingestion gateway, upload multipart, Hybrid Serving (+ Bloom + Cold-start Boost + Diversity), WebSocket metrics. \\
+extract-worker & Python + FFmpeg & Consume \path{events.extract}, chạy \texttt{ffprobe}\slash\texttt{ffmpeg} trích xuất duration, resolution, fps, thumbnail, tags $\rightarrow$ \texttt{enriched}. \\
+speed-worker & Python + aiokafka & Consume \path{events.user}, gom cửa sổ Tumbling 60\,s cập nhật Redis affinity \& hot tags (không trùng lặp với API). \\
+traffic-simulator & Python (httpx) & Replay \path{interactions_stream.csv} theo timeline (\texttt{SPEEDUP}, \texttt{EVENTS\_PER\_SEC}) vào \path{POST /api/events}. \\
+upload-simulator & Python (httpx) & Mỗi $15$\,s đăng 5 video từ \path{upload_pool} vào \path{POST /api/upload} mô phỏng luồng Provider. \\
+web & React 18 + Vite & Giao diện TikTok Web + bảng \textbf{Show Big Data} + \textbf{Live Simulation (5+5)} + System Ops. \\
+\bottomrule
+\end{tabularx}}
+\end{center}
+
+Media video và thumbnail được lưu trên shared Docker volume \texttt{/data/media} và phục vụ qua endpoint \texttt{/media} của API (thay cho MinIO community do hạn chế pull image ẩn danh trên môi trường demo).
+
+\section{Thiết kế giao diện TikTok Web và Big Data theo ngữ cảnh}
+
+Khác với cách trình bày dồn toàn bộ chỉ số kỹ thuật vào một màn hình gây rối, giao diện \textbf{StreamRec} tách bạch trải nghiệm người dùng cuối và lớp quan sát Big Data thông qua nút bật/tắt \textbf{Show Big Data} (mặc định tắt để giữ nguyên diện mạo TikTok thuần túy):
+
+\begin{itemize}
+  \item \textbf{For~You (\texttt{/}):} Trình phát video dọc 9:16 vận hành theo cơ chế \textbf{Batch Prefetch (20 video/lô) + Infinite Feed} giống TikTok thật (tự nạp thêm lô mới chưa xem qua Bloom Filter khi còn $\le 5$ video). Lướt nhanh $<2$\,s tự động gửi \texttt{skip}. Khi bật \textbf{Show Big Data}, bảng bên phải hiển thị phân rã điểm Hybrid, thanh chỉnh $\alpha/\beta/\gamma$, \textbf{Top 10 đề xuất tiếp theo (Live Diff)} đồng bộ 100\% với hàng chờ phát (có huy hiệu $\blacktriangle/+N$, $\blacktriangledown/-N$, \texttt{NEW}), hồ sơ affinity + Bloom Filter của user và log sự kiện vừa gửi.
+  \item \textbf{Explore (\texttt{/trending}):} Lưới video thịnh hành hỗ trợ chuyển đổi trực tiếp giữa \textbf{Trending 1 phút (Live)} (tự làm mới mỗi 5\,s) và \textbf{Trong ngày (24h)}. Khi bật \textbf{Show Big Data}, bảng bên phải chỉ hiển thị \textbf{Speed Layer Hot Tags (cửa sổ 1 phút)} trên Redis \path{metrics:hot_tags:1m}.
+  \item \textbf{TikTok Studio (\texttt{/studio}):} Giao diện dành cho \textbf{Provider} gồm form upload, khung điện thoại preview trực tiếp và danh sách video đã đăng. Khi bật \textbf{Show Big Data}, bảng bên phải hiển thị số liệu sống của \texttt{extract-worker}: tổng số video đã trích xuất cộng dồn (\textbf{Extracted}), quy mô \textbf{Catalog}, tốc độ \texttt{ffprobe} (\textbf{Speed}, ms) và danh sách video mới nhất.
+  \item \textbf{Live Simulation (\texttt{/simulation}):} Tường mô phỏng trực quan gồm \textbf{5 điện thoại Customer} (hàng trên, hiển thị 5 người dùng gần nhất từ \texttt{traffic-simulator} kèm badge Like/Skip/Share/Watch) và \textbf{5 điện thoại Provider} (hàng dưới, hiển thị 5 video mới nhất từ \texttt{upload-simulator} đi qua Upload $\rightarrow$ Extract $\rightarrow$ Enriched).
+  \item \textbf{System Ops (\texttt{/dashboard}):} Trang giám sát hạ tầng toàn cục tách riêng gồm 4 thẻ KPI live (\textbf{Kafka Velocity}, \textbf{Volume Interactions 1 phút}, \textbf{HyperLogLog Active Users 1 phút}, \textbf{Batch CF Pairs}), sơ đồ Lambda Dataflow, biểu đồ throughput WebSocket, chỉnh trọng số $\alpha/\beta/\gamma$ và nút \textit{Run Batch CF Now}.
+\end{itemize}
+
+\placeholderfig{Giao diện For You kiểu TikTok khi bật bảng Show Big Data theo ngữ cảnh}{graphics/feed.png}
+
+\placeholderfig{Giao diện TikTok Studio (Provider Upload + Preview) và luồng Extract Live}{graphics/upload.png}
+
+\placeholderfig{Trang System Ops Dashboard (Throughput, Lambda Dataflow, HyperLogLog, Spark ALS)}{graphics/dashboard.png}
